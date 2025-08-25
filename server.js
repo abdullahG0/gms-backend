@@ -27,24 +27,28 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '10mb' }));
 
 // ---------- CORS (env-driven) ----------
-const corsOrigins = (process.env.CORS_ORIGIN || '')
+
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || '')
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
 
-const corsOptions = corsOrigins.length
-  ? {
-      origin: (origin, cb) => {
-        // allow same-origin / server-to-server / curl
-        if (!origin) return cb(null, true);
-        if (corsOrigins.includes(origin)) return cb(null, true);
-        return cb(new Error('CORS: origin not allowed'), false);
-      },
-      credentials: true,
-    }
-  : { origin: true, credentials: true }; // fallback: allow all (dev)
+// If CORS_ORIGIN is not set, default to permissive during bring-up.
+const corsOptions = {
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // same-origin / curl
+    if (ALLOWED_ORIGINS.length === 0) return cb(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET','HEAD','PUT','PATCH','POST','DELETE'],
+  allowedHeaders: ['Content-Type','Authorization'],
+  credentials: false,
+};
 
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
 
 // ---------- Postgres (SSL in production) ----------
 const isProd = process.env.NODE_ENV === 'production';
@@ -62,6 +66,42 @@ const pool = new Pool({
     console.error('DB connection failed:', err);
   }
 })();
+// ---- PDF header (logo) helper ----
+const ASSETS_DIR = process.env.ASSETS_DIR || path.join(process.cwd(), 'assets');
+const PDF_LOGO_PATH = process.env.PDF_LOGO_PATH || path.join(ASSETS_DIR, 'logo.png');
+const hasPdfLogo = fs.existsSync(PDF_LOGO_PATH);
+
+/**
+ * Draw a consistent header with logo + title
+ *  - Puts the logo on the left (if present), and the title to the right
+ *  - Draws a light divider line under the header
+ * After calling this, the cursor is positioned below the header area.
+ */
+function drawPdfHeader(doc, title) {
+  const top = 40;
+  const left = 50;
+
+  if (hasPdfLogo) {
+    try {
+      // Fit the logo – adjust if you want it bigger/smaller
+      doc.image(PDF_LOGO_PATH, left, top, { fit: [220, 60] });
+    } catch (e) {
+      console.warn('PDF logo failed to load:', e.message);
+    }
+    doc.fontSize(18).text(title, left + 240, top + 15, { align: 'left' });
+  } else {
+    doc.fontSize(18).text(title, { align: 'center' });
+  }
+
+  // Divider
+  const lineY = 110;
+  doc.strokeColor('#e5e7eb').moveTo(left, lineY).lineTo(550, lineY).stroke();
+  doc.strokeColor('black');
+
+  // Move down into content area
+  doc.moveDown(0.5);
+  doc.y = Math.max(doc.y, lineY + 10);
+}
 
 // ---------- Health check ----------
 app.get('/healthz', async (req, res) => {
@@ -665,6 +705,7 @@ app.get('/api/invoices/:id', async (req, res) => {
 
 // Invoice PDF
 app.get('/api/invoices/:id/pdf', async (req, res) => {
+  
   try {
     const { id } = req.params;
 
@@ -707,11 +748,9 @@ app.get('/api/invoices/:id/pdf', async (req, res) => {
     const doc = new PDFDocument({ size: 'A4', margin: 50 });
     doc.pipe(res);
 
-    // Header
-    doc.fontSize(18).text(`Invoice #${r.id}`, { align: 'center' });
-    doc.moveDown(0.5);
-    doc.fontSize(12).text(`Generated: ${new Date().toLocaleString()}`);
-    doc.moveDown(0.8);
+   // Header
+drawPdfHeader(doc, `Invoice #${r.id}`);
+
 
     // Meta
     doc.text(`Vehicle Plate: ${r.plate || '-'}`);
@@ -868,8 +907,8 @@ app.get('/api/workers/:id/payments/pdf', async (req, res) => {
     doc.pipe(res);
 
     // Title
-    doc.fontSize(18).text('Worker Payment Report', { align: 'center' });
-    doc.moveDown(0.5);
+    drawPdfHeader(doc, 'Worker Payment Report');
+
     doc.fontSize(12).text(`Worker: ${worker.name || ''} (ID: ${worker.id})`);
     if (worker.job_title) doc.text(`Job Title: ${worker.job_title}`);
     if (worker.phone) doc.text(`Phone: ${worker.phone}`);
