@@ -907,8 +907,8 @@ app.get('/api/workers/:id/payments/pdf', async (req, res) => {
     doc.pipe(res);
 
     // Title
-    drawPdfHeader(doc, 'Worker Payment Report');
-
+    doc.fontSize(18).text('Worker Payment Report', { align: 'center' });
+    doc.moveDown(0.5);
     doc.fontSize(12).text(`Worker: ${worker.name || ''} (ID: ${worker.id})`);
     if (worker.job_title) doc.text(`Job Title: ${worker.job_title}`);
     if (worker.phone) doc.text(`Phone: ${worker.phone}`);
@@ -981,6 +981,59 @@ app.get('/api/archive/files/:year', (req, res) => {
     url: `/uploads/invoices/${year}/${name}`,
   }));
   res.json({ year, files: items });
+});
+// Delete vehicle (cascade invoices + items first)
+app.delete('/api/vehicles/:id', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    await client.query('BEGIN');
+
+    // Delete invoice items of invoices tied to this vehicle
+    await client.query(
+      `DELETE FROM invoice_items 
+       WHERE invoice_id IN (SELECT id FROM invoices WHERE vehicle_id = $1)`,
+      [id]
+    );
+
+    // Delete invoices of this vehicle
+    await client.query(`DELETE FROM invoices WHERE vehicle_id = $1`, [id]);
+
+    // Finally delete vehicle
+    const result = await client.query(`DELETE FROM vehicles WHERE id = $1 RETURNING id`, [id]);
+
+    await client.query('COMMIT');
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Vehicle not found' });
+    res.status(204).send();
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Error deleting vehicle:', err);
+    res.status(500).json({ error: 'Server error deleting vehicle' });
+  } finally {
+    client.release();
+  }
+});
+
+// Delete invoice (cascade invoice items first)
+app.delete('/api/invoices/:id', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    await client.query('BEGIN');
+
+    await client.query(`DELETE FROM invoice_items WHERE invoice_id = $1`, [id]);
+    const result = await client.query(`DELETE FROM invoices WHERE id = $1 RETURNING id`, [id]);
+
+    await client.query('COMMIT');
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Invoice not found' });
+    res.status(204).send();
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Error deleting invoice:', err);
+    res.status(500).json({ error: 'Server error deleting invoice' });
+  } finally {
+    client.release();
+  }
 });
 
 // ---------- MISC ----------
